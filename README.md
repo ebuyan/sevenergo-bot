@@ -1,4 +1,4 @@
-# energo
+# sevenergo-bot
 
 HTTP-сервис для автоматизации работы с личным кабинетом [sevenergosbyt.ru](https://sevenergosbyt.ru/flk/).
 
@@ -115,7 +115,7 @@ docker run -p 8080:8080 \
 ```yaml
 services:
   energo:
-    image: https://github.com/ebuyan/sevenergo-bot
+    build: https://github.com/ebuyan/sevenergo-bot.git
     ports:
       - "8321:8080"
     environment:

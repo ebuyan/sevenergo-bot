@@ -30,7 +30,7 @@ type config struct {
 	Username     string `envconfig:"ENERGO_USERNAME"      required:"true"`
 	LicevoySchet string `envconfig:"ENERGO_LICEVOY_SCHET" required:"true"`
 	NomerSchet   string `envconfig:"ENERGO_NOMER_SCHET"   required:"true"`
-	Key          string `envconfig:"ENERGO_KEY"           required:"true"`
+	Key          string `envconfig:"ENERGO_KEY"           default:"1234"`
 	Email        string `envconfig:"ENERGO_EMAIL"         required:"true"`
 	ListenAddr   string `envconfig:"LISTEN_ADDR"          default:":8080"`
 }
