@@ -46,7 +46,7 @@ func loadConfig() error {
 var reBalanceType = regexp.MustCompile(`(Переплата|Задолженность)\s+на\s+(\d{2}\.\d{2}\.\d{4})`)
 var reAmount = regexp.MustCompile(`(\d+\.\d+)\s+руб\.`)
 var reLastReading = regexp.MustCompile(`<strong>([\d.]+)</strong>&nbsp;\s*от\s*<strong>(\d{2}\.\d{2}\.\d{4})</strong>`)
-var rePendingReading = regexp.MustCompile(`<strong>([\d.]+)<span[^>]*>\s*\*\s*</span></strong>\s*от\s*<strong>(\d{2}\.\d{2}\.\d{4})</strong>`)
+var rePendingReading = regexp.MustCompile(`<strong>([\d.]+)(?:<span[^>]*>\s*\*\s*</span>)?</strong>\s*от\s*<strong>(\d{2}\.\d{2}\.\d{4})</strong>`)
 var rePendingStatus = regexp.MustCompile(`<span[^>]*>(показания[^<]+)</span>`)
 var reDiff = regexp.MustCompile(`Разница\s+(\d+)\s+кВт`)
 

@@ -115,7 +115,7 @@ docker run -p 8080:8080 \
 ```yaml
 services:
   energo:
-    build: https://github.com/ebuyan/sevenergo-bot.git
+    build: https://github.com/ebuyan/sevenergo-bot.git#main
     ports:
       - "8321:8080"
     environment:
