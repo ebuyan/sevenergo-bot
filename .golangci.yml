@@ -1,0 +1,107 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+formatters:
+  enable:
+    - goimports
+  exclusions:
+    rules:
+      - path: "_test\\.go"
+
+linters:
+  default: none
+  enable:
+    # correctness
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - bodyclose
+    - contextcheck
+    - durationcheck
+    - errorlint
+    - fatcontext
+    - forcetypeassert
+    - noctx
+    - nilerr
+    - rowserrcheck
+    - sqlclosecheck
+    - copyloopvar
+    # security
+    - gosec
+    # code quality
+    - gocognit
+    - nestif
+    - funlen
+    - gocritic
+    - revive
+    - unconvert
+    - unparam
+    - prealloc
+    # style
+    - misspell
+    - dupword
+    - godot
+    - nolintlint
+    - sloglint
+    - testifylint
+
+  settings:
+    gocognit:
+      min-complexity: 15
+
+    nestif:
+      min-complexity: 5
+
+    funlen:
+      lines: 80
+      statements: 50
+
+    gosec:
+      excludes:
+        - G404  # weak random — not relevant for non-crypto use
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+      disabled-checks:
+        - commentedOutCode
+        - whyNoLint
+        - unnamedResult
+
+    revive:
+      rules:
+        - name: error-return
+        - name: error-naming
+        - name: if-return
+        - name: var-naming
+        - name: range
+        - name: unused-parameter
+        - name: unreachable-code
+
+    godot:
+      scope: declarations
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+  exclusions:
+    rules:
+      - path: "_test\\.go"
+        linters:
+          - funlen
+          - gocognit
+          - gosec
+          - unparam
+          - forcetypeassert
+      # processOne intentionally creates a detached context for graceful shutdown:
+      # the job must complete within shutdownTimeout even after rootCtx is cancelled.
+      - path: "internal/worker/worker\\.go"
+        linters:
+          - contextcheck

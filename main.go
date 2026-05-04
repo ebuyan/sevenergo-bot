@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kelseyhightower/envconfig"
 )
@@ -76,7 +79,7 @@ func parseHome(html string) (homeResponse, error) {
 
 	mAmt := reAmount.FindStringSubmatch(html)
 	if mAmt == nil {
-		return resp, fmt.Errorf("не найдена сумма в руб.")
+		return resp, errors.New("не найдена сумма в руб")
 	}
 	amount, err := strconv.ParseFloat(mAmt[1], 64)
 	if err != nil {
@@ -112,7 +115,7 @@ func parseHome(html string) (homeResponse, error) {
 
 // --- Сессия ---
 
-func authenticate() (*http.Client, error) {
+func authenticate(ctx context.Context) (*http.Client, error) {
 	jar, _ := cookiejar.New(nil)
 	siteURL, _ := url.Parse("https://sevenergosbyt.ru")
 	jar.SetCookies(siteURL, []*http.Cookie{
@@ -131,7 +134,7 @@ func authenticate() (*http.Client, error) {
 		"act":          {"login"},
 	}
 
-	req, err := http.NewRequest(http.MethodPost, checkURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, checkURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("build check request: %w", err)
 	}
@@ -142,7 +145,7 @@ func authenticate() (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("check.php: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -165,8 +168,8 @@ func authenticate() (*http.Client, error) {
 	return client, nil
 }
 
-func fetchHome(client *http.Client) (homeResponse, error) {
-	req, err := http.NewRequest(http.MethodGet, homeURL, nil)
+func fetchHome(ctx context.Context, client *http.Client) (homeResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, homeURL, http.NoBody)
 	if err != nil {
 		return homeResponse{}, fmt.Errorf("build home request: %w", err)
 	}
@@ -179,7 +182,7 @@ func fetchHome(client *http.Client) (homeResponse, error) {
 	if err != nil {
 		return homeResponse{}, fmt.Errorf("home/: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	log.Printf("[home/] status=%d final_url=%s", resp.StatusCode, resp.Request.URL)
 
 	htmlBytes, err := io.ReadAll(resp.Body)
@@ -192,15 +195,16 @@ func fetchHome(client *http.Client) (homeResponse, error) {
 
 // --- Хендлеры ---
 
-// GET /status — баланс и показания счётчика
+// GET /status — баланс и показания счётчика.
 func statusHandler(w http.ResponseWriter, r *http.Request) {
-	client, err := authenticate()
+	ctx := r.Context()
+	client, err := authenticate(ctx)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "auth: "+err.Error())
 		return
 	}
 
-	result, err := fetchHome(client)
+	result, err := fetchHome(ctx, client)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -209,8 +213,55 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result)
 }
 
-// GET /submit?value=88500 — передать показания счётчика
+func validateReading(newReading float64, current *homeResponse) error {
+	baseline := current.LastReading
+	baselineLabel := fmt.Sprintf("зафиксированным %.0f", current.LastReading)
+	if current.PendingReading != nil {
+		baseline = *current.PendingReading
+		baselineLabel = fmt.Sprintf("показаниям на обработке %.0f", *current.PendingReading)
+	}
+	if newReading <= baseline {
+		return fmt.Errorf("показания %.0f не могут быть меньше или равны %s", newReading, baselineLabel)
+	}
+	if diff := newReading - current.LastReading; diff > 4000 {
+		return fmt.Errorf("разница %.0f кВт·ч превышает допустимые 4000 кВт·ч (зафиксировано: %.0f)", diff, current.LastReading)
+	}
+	return nil
+}
+
+func postResult(ctx context.Context, client *http.Client, value string) error {
+	target, _ := url.Parse(resultURL)
+	target.RawQuery = url.Values{
+		"TOTALZONES":       {"1"},
+		"NewCounterZone_1": {value},
+	}.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), http.NoBody)
+	if err != nil {
+		return fmt.Errorf("build result request: %w", err)
+	}
+	setHeaders(req, homeReferer, "")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-User", "?1")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("result.php: %w", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		log.Printf("[result.php] close body: %v", err)
+	}
+	log.Printf("[result.php] status=%d final_url=%s", resp.StatusCode, resp.Request.URL)
+	return nil
+}
+
+// GET /submit?value=88500 — передать показания счётчика.
 func submitHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	value := r.URL.Query().Get("value")
 	if value == "" {
 		writeError(w, http.StatusBadRequest, "параметр value обязателен (текущие показания счётчика)")
@@ -222,70 +273,29 @@ func submitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := authenticate()
+	client, err := authenticate(ctx)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "auth: "+err.Error())
 		return
 	}
 
-	current, err := fetchHome(client)
+	current, err := fetchHome(ctx, client)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "получение текущих показаний: "+err.Error())
 		return
 	}
 
-	baseline := current.LastReading
-	baselineLabel := fmt.Sprintf("зафиксированным %.0f", current.LastReading)
-	if current.PendingReading != nil {
-		baseline = *current.PendingReading
-		baselineLabel = fmt.Sprintf("показаниям на обработке %.0f", *current.PendingReading)
-	}
-
-	if newReading <= baseline {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf(
-			"показания %.0f не могут быть меньше или равны %s", newReading, baselineLabel,
-		))
+	if err := validateReading(newReading, &current); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	if diff := newReading - current.LastReading; diff > 4000 {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf(
-			"разница %.0f кВт·ч превышает допустимые 4000 кВт·ч (зафиксировано: %.0f)",
-			diff, current.LastReading,
-		))
+	if err := postResult(ctx, client, value); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 
-	target, _ := url.Parse(resultURL)
-	target.RawQuery = url.Values{
-		"TOTALZONES":       {"1"},
-		"NewCounterZone_1": {value},
-	}.Encode()
-
-	req, err := http.NewRequest(http.MethodGet, target.String(), nil)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "build result request: "+err.Error())
-		return
-	}
-	setHeaders(req, homeReferer, "")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("Sec-Fetch-User", "?1")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-
-	resultResp, err := client.Do(req)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "result.php: "+err.Error())
-		return
-	}
-	if err := resultResp.Body.Close(); err != nil {
-		log.Printf("[result.php] close body: %v", err)
-	}
-	log.Printf("[result.php] status=%d final_url=%s", resultResp.StatusCode, resultResp.Request.URL)
-
-	result, err := fetchHome(client)
+	result, err := fetchHome(ctx, client)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "parse home after submit: "+err.Error())
 		return
@@ -305,8 +315,9 @@ func submitHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result)
 }
 
-// GET /pay?amount=100&email=user@mail.ru — получить ссылку на оплату ВТБ
+// GET /pay?amount=100&email=user@mail.ru — получить ссылку на оплату ВТБ.
 func payHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	q := r.URL.Query()
 
 	amount := q.Get("amount")
@@ -319,9 +330,14 @@ func payHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := authenticate()
+	client, err := authenticate(ctx)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "auth: "+err.Error())
+		return
+	}
+
+	if _, err := fetchHome(ctx, client); err != nil {
+		writeError(w, http.StatusBadGateway, "home/: "+err.Error())
 		return
 	}
 
@@ -337,7 +353,7 @@ func payHandler(w http.ResponseWriter, r *http.Request) {
 		"deviceId":       {""},
 	}
 
-	req, err := http.NewRequest(http.MethodPost, vtbPayURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, vtbPayURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "build vtb_pay request: "+err.Error())
 		return
@@ -351,7 +367,7 @@ func payHandler(w http.ResponseWriter, r *http.Request) {
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 
 	noRedirectClient := *client
-	noRedirectClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+	noRedirectClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 
@@ -360,13 +376,20 @@ func payHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "vtb_pay.php: "+err.Error())
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	log.Printf("[vtb_pay.php] status=%d", resp.StatusCode)
 
 	redirectURL := resp.Header.Get("Location")
 	if redirectURL == "" {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf(
 			"vtb_pay.php не вернул редирект (status=%d)", resp.StatusCode,
+		))
+		return
+	}
+
+	if strings.Contains(redirectURL, "STATUS=Error") {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf(
+			"vtb_pay.php вернул ошибку: %s", redirectURL,
 		))
 		return
 	}
@@ -420,5 +443,11 @@ func main() {
 	fmt.Println("  GET /submit?value=88500")
 	fmt.Println("  GET /pay?amount=100")
 
-	log.Fatal(http.ListenAndServe(cfg.ListenAddr, nil))
+	srv := &http.Server{
+		Addr:         cfg.ListenAddr,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  5 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }
